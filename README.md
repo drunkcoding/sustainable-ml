@@ -12,39 +12,6 @@ torch>=2.0
 - [ ] convert backward pass to use `?` (research needed)
 
 ```python
-def pre_forward_module_hook(module, args, kwargs):
-    """
-    Args:
-        module: nn.Module. The module to be hooked.
-        input: Tensor. The input tensor to the module.
-    """
-    pass
-
-def post_forward_module_hook(module, args, kwargs):
-    """
-    Args:
-        module: nn.Module. The module to be hooked.
-        input: Tensor. The input tensor to the module.
-        output: Tensor. The output tensor of the module.
-    """
-
-def pre_backward_module_hook(module, grad_input):
-    """
-
-    Args:
-        module: nn.Module. The module to be hooked.
-        grad_input: Tensor. The gradient of the input tensor.
-        grad_output: Tensor. The gradient of the output tensor.
-    """
-
-def post_backward_module_hook(module, grad_input, grad_output):
-    """
-    Args:
-        module: nn.Module. The module to be hooked.
-        grad_input: Tensor. The gradient of the input tensor.
-        grad_output: Tensor. The gradient of the output tensor.
-    """
-
 def custom_forward_decorator(original_forward: Callable) -> Callable:
     @functools.wraps(original_forward)
     def wrapper(*args, **kwargs):
@@ -52,9 +19,21 @@ def custom_forward_decorator(original_forward: Callable) -> Callable:
 
     return wrapper
 
+model = ... # Load model from HuggingFace's model hub
+
+custom_backend = ... # replace with custom backend, initialize with model
+custom_optimizer = ... # replace with custom optimizer, initialize with model parameters
+
+for module in model.modules():
+    if isinstance(module, nn.Linear):
+        module.forward = custom_forward_decorator(module.forward)
+        # activation function does not consume much time, so we don't need to parallelize it
+
 # write our own backward pass, might need DeepSpeed code
+custom_backend.backward()
 
 # custom optimizer step, might need DeepSpeed code
+custom_optimizer.step()
 
 ```
 
