@@ -17,3 +17,6 @@ print(tokenizer.decode(outputs[0])) # A cat sat on my lap for a few minutes ...
 loss = model(input_ids=inputs, labels=inputs).loss  # training works as usual
 
 make_dot(loss).render("tp_oss", format="pdf")  # visualize the computation graph
+
+
+

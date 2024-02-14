@@ -77,29 +77,29 @@ def grad_fn_wrapper(grad_fn):
     def wrapper(*args, **kwargs):
         print("grad_fn_wrapper", args, kwargs)
         return grad_fn(*args, **kwargs)
-loss.grad_fn = grad_fn_wrapper(loss.grad_fn)
+# loss.grad_fn = grad_fn_wrapper(loss.grad_fn)
 
-loss.backward()
+# loss.backward()
 
-# make_dot(loss, params=dict(model.named_parameters())).render("loss", format="pdf")
+make_dot(loss, show_attrs=True, show_saved=False, params=dict(model.named_parameters())).render("loss", format="pdf")
 
-print("loss", loss)
-# print("loss", dir(loss.grad_fn), loss.grad_fn.next_functions, loss.grad_fn.name(), loss.grad_fn.metadata)
-# print("model.x", model.x)
-print('Grad fc1', model.fc1.weight.grad)
-print('Grad fc2', model.fc2.weight.grad)
+# print("loss", loss)
+# # print("loss", dir(loss.grad_fn), loss.grad_fn.next_functions, loss.grad_fn.name(), loss.grad_fn.metadata)
+# # print("model.x", model.x)
+# print('Grad fc1', model.fc1.weight.grad)
+# print('Grad fc2', model.fc2.weight.grad)
 
-print(dir(loss.grad_fn.__init__))
-sig = inspect.signature(loss.grad_fn.__init__)
-parameters = sig.parameters
+# print(dir(loss.grad_fn.__init__))
+# sig = inspect.signature(loss.grad_fn.__init__)
+# parameters = sig.parameters
 
-# Listing argument names
-for name, param in parameters.items():
-    print(name)
-print("model.fc1.grad_fn", loss.grad_fn.__code__.co_varnames)
+# # Listing argument names
+# for name, param in parameters.items():
+#     print(name)
+# print("model.fc1.grad_fn", loss.grad_fn.__code__.co_varnames)
 
-# optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
-# optimizer.step()
+# # optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+# # optimizer.step()
 
 print("model.fc1", model.fc1.weight)
 print("model.fc2", model.fc2.weight)
