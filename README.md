@@ -37,6 +37,56 @@ custom_optimizer.step()
 
 ```
 
+### Parameter Indexing
+
+```cpp
+```
+
+### Parameter Cache Coherence
+
+```protobuf
+// define gRPC message
+
+service CacheCoherence {
+    rpc GetParameter(Parameter) returns (Parameter) {}
+}
+
+message GetParameterRequest {
+    int64 client_id = 1; // unique id for each client
+}
+
+message GetParameterResponse {
+    bytes input = 1;
+    bytes parameter = 2;
+}
+```
+
+Each client will send a `GetParameterRequest` to the server, and the server will return a `GetParameterResponse` with the parameter.
+The client will cache the parameter and use it for jobs.
+The server will register and update the client id and its associated parameter.
+Clients join and leave the server, and the server will update the client id and its associated parameter (zookeeper keep alive or on link disconnect, event based).
+
+```python
+# Server Implementation
+class CacheCoherenceServicer(CacheCoherenceServicer):
+    def __init__(self):
+        pass
+
+    def parameter_for_client(self, request):
+        client_id = request.client_id
+        ... # handle client cache here
+
+    def GetParameter(self, request, context):
+        client_id = request.client_id
+        if is_registered(client_id):
+            return GetParameterResponse(input=client_id, parameter=parameter_for_client(request))
+        else:
+            register_client(client_id)
+            return GetParameterResponse(input=client_id, parameter=parameter_for_client(request))
+```
+
+### Model Parallelism Dispatcher
+
 ## Simulation Guide
 
 ```python
