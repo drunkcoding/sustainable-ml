@@ -22,9 +22,9 @@ parser.add_argument("--flops", type=float, default=3.0, help="FLOPS for the hard
 parser.add_argument("--dtype", type=str, default="float", help="Data type (float or half)")
 parser.add_argument("--num_devices", type=int, default=8)
 parser.add_argument("--batch_size", type=int, default=128, help="batch size")
-parser.add_argument("--seq_len", type=int, default=128, help="sequence length")
+parser.add_argument("--seq_len", type=int, default=1024, help="sequence length")
 parser.add_argument("--in_bw", type=int, default=100, help="ingress bandwidth (MB/s)")
-parser.add_argument("--out_bw", type=int, default=10, help="egress bandwidth (MB/s)")
+parser.add_argument("--out_bw", type=int, default=5, help="egress bandwidth (MB/s)")
 # parser.add_argument("--dp", type=int, default=1, help="number of data parallelism")
 # parser.add_argument("--pp", type=int, default=1, help="number of pipeline parallelism")
 
@@ -40,17 +40,31 @@ batch_size = args.batch_size
 seq_len = args.seq_len
 dtype_size = 4 if args.dtype == "float" else 2
 
-# forward flops, backward needs double the flops
-K_flops = gemm_flops(batch_size * seq_len, hidden_size, hidden_size)
-V_flops = gemm_flops(batch_size * seq_len, hidden_size, hidden_size)
-Q_flops = gemm_flops(batch_size * seq_len, hidden_size, hidden_size)
-O_flops = gemm_flops(batch_size * seq_len, hidden_size, hidden_size)
+def layer_flops(batch_size):
+    # forward flops, backward needs double the flops
+    K_flops = gemm_flops(batch_size * seq_len, hidden_size, hidden_size)
+    V_flops = gemm_flops(batch_size * seq_len, hidden_size, hidden_size)
+    Q_flops = gemm_flops(batch_size * seq_len, hidden_size, hidden_size)
+    O_flops = gemm_flops(batch_size * seq_len, hidden_size, hidden_size)
 
-attn_flops = gemm_flops(batch_size * seq_len, hidden_size, seq_len)
-attn_proj_flops = gemm_flops(batch_size * seq_len, hidden_size, hidden_size)
+    attn_flops = gemm_flops(batch_size * seq_len, hidden_size, seq_len)
+    attn_proj_flops = gemm_flops(batch_size * seq_len, hidden_size, hidden_size)
 
-fc1_flops = gemm_flops(batch_size * seq_len, ffn_size, hidden_size)
-fc2_flops = gemm_flops(batch_size * seq_len, hidden_size, ffn_size)
+    fc1_flops = gemm_flops(batch_size * seq_len, ffn_size, hidden_size)
+    fc2_flops = gemm_flops(batch_size * seq_len, hidden_size, ffn_size)
+
+    layer_flops = (
+        K_flops
+        + V_flops
+        + Q_flops
+        + O_flops
+        + attn_flops
+        + attn_proj_flops
+        + fc1_flops
+        + fc2_flops
+    )
+
+    return layer_flops
 
 Q_shape = (hidden_size, hidden_size)
 K_shape = (hidden_size, hidden_size)
@@ -69,16 +83,7 @@ fc1_size = np.prod(fc1_shape) * dtype_size
 fc2_size = np.prod(fc2_shape) * dtype_size
 
 
-layer_flops = (
-    K_flops
-    + V_flops
-    + Q_flops
-    + O_flops
-    + attn_flops
-    + attn_proj_flops
-    + fc1_flops
-    + fc2_flops
-)
+
 layer_size = Q_size + K_size + V_size + O_size + fc1_size + fc2_size
 intermediate_size = batch_size * seq_len * hidden_size * dtype_size
 
@@ -99,9 +104,9 @@ for num_dp_stage in range(1, args.num_devices + 1):
             continue
 
         total_latency = (
-            layer_flops / (args.flops * 1e9)
+            num_layers * layer_flops(batch_size // num_dp_stage) / (args.flops * 1e12) * 3 # 3 = 1F + 2B
             + num_layers * allreduce_time(layer_size, args.out_bw * 1e6, num_dp_stage)
-            + comm_time(intermediate_size, args.out_bw * 1e6, num_pp_stage)
+            + comm_time(intermediate_size // num_dp_stage, args.out_bw * 1e6, num_pp_stage)
         )
 
         hybrid_latency_list.append(
