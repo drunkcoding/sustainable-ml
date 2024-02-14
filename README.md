@@ -87,6 +87,43 @@ class CacheCoherenceServicer(CacheCoherenceServicer):
 
 ### Model Parallelism Dispatcher
 
+```python
+# example of linear model 
+model = nn.Sequential(
+    nn.Linear(1024, 4096),
+    ReLU(),
+    nn.Linear(4096, 4096),
+    ReLU(),
+    nn.Linear(4096, 4096),
+    ReLU(),
+    nn.Linear(4096, 1024),
+)
+
+n_layers = 4
+n_devices = 16
+
+# each device has random delays
+# TODO: implement whole row and column decomposition for tensor parallelism; more complex decomposition comes later
+
+# K * N, N * M GeMM
+def decompose_matrix(input, weight):
+    tasks = []
+    K, N = input.shape
+    N, M = weight.shape
+
+    for i in range(K):
+        for j in range(M):
+            tasks.append((i, j, input[i, :], weight[:, j])
+
+    return tasks
+
+# TODO: devices tasks tasks and execute them
+def execute_tasks(tasks, devices):
+    pass
+
+
+```
+
 ## Simulation Guide
 
 ```python
