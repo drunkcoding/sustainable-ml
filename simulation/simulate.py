@@ -3,6 +3,10 @@ import transformers
 import argparse
 from transformers import AutoConfig
 
+KB = 1024
+MB = 1024 * KB
+GB = 1024 * MB
+
 
 def gemm_flops(m, n, k):
     return 2 * m * n * k
@@ -11,6 +15,11 @@ def gemm_flops(m, n, k):
 def allreduce_time(size, bw, dp):
     return size / bw * 2 * (dp - 1) / dp
 
+def allgather_time(size, bw, n):
+    return size / bw * (n - 1) / n
+
+def reducescatter_time(size, bw, n):
+    return size / bw * (n - 1) / n
 
 def comm_time(size, bw, pp):
     return size / bw * (pp - 1)
@@ -22,7 +31,7 @@ parser.add_argument("--flops", type=float, default=3.0, help="FLOPS for the hard
 parser.add_argument("--dtype", type=str, default="float", help="Data type (float or half)")
 parser.add_argument("--num_devices", type=int, default=8)
 parser.add_argument("--batch_size", type=int, default=128, help="batch size")
-parser.add_argument("--seq_len", type=int, default=1024, help="sequence length")
+parser.add_argument("--seq_len", type=int, default=512, help="sequence length")
 parser.add_argument("--in_bw", type=int, default=100, help="ingress bandwidth (MB/s)")
 parser.add_argument("--out_bw", type=int, default=5, help="egress bandwidth (MB/s)")
 # parser.add_argument("--dp", type=int, default=1, help="number of data parallelism")
@@ -39,6 +48,9 @@ ffn_size = config.ffn_dim
 batch_size = args.batch_size
 seq_len = args.seq_len
 dtype_size = 4 if args.dtype == "float" else 2
+
+
+assert 4096*32 >= batch_size * seq_len, "batch_size * seq_len must be less than 4096*32"
 
 def layer_flops(batch_size):
     # forward flops, backward needs double the flops
@@ -100,13 +112,19 @@ intermediate_size = batch_size * seq_len * hidden_size * dtype_size
 hybrid_latency_list = []
 for num_dp_stage in range(1, args.num_devices + 1):
     for num_pp_stage in range(2, args.num_devices + 1):
-        if num_dp_stage * num_pp_stage != args.num_devices or num_pp_stage > num_layers // 2:
+        if num_dp_stage * num_pp_stage != args.num_devices or num_pp_stage > num_layers * 5:
             continue
 
+        compute_time = num_layers * layer_flops(batch_size // num_dp_stage) / (args.flops * 1e12) * 3 # 3 = 1F + 2B
+        pp_comm_time = comm_time(intermediate_size // num_dp_stage, args.out_bw * 1e6, num_pp_stage) * 2 # 2 = 1F + 1B
+        fully_overlap_pp_comm_time = max(pp_comm_time, compute_time) - min(compute_time, pp_comm_time)
+        allredice_time = num_layers * allreduce_time(layer_size, args.out_bw * 1e6, num_dp_stage)
+        fully_overlap_allreduce_time = max(allredice_time, compute_time / 3 * 2) - min(allredice_time, compute_time / 3 * 2)
+
         total_latency = (
-            num_layers * layer_flops(batch_size // num_dp_stage) / (args.flops * 1e12) * 3 # 3 = 1F + 2B
-            + num_layers * allreduce_time(layer_size, args.out_bw * 1e6, num_dp_stage)
-            + comm_time(intermediate_size // num_dp_stage, args.out_bw * 1e6, num_pp_stage)
+            compute_time + fully_overlap_pp_comm_time + fully_overlap_allreduce_time
+            # + num_layers * allreduce_time(layer_size, args.out_bw * 1e6, num_dp_stage)
+            # + comm_time(intermediate_size // num_dp_stage, args.out_bw * 1e6, num_pp_stage) * 2 # 2 = 1F + 1B
         )
 
         hybrid_latency_list.append(
@@ -151,3 +169,20 @@ plt.xlabel("Data Parallelism Stage")
 plt.ylabel("Pipeline Parallelism Stage")
 
 plt.savefig("hybrid_latency.pdf")
+
+num_tp_stages = max(args.num_devices, batch_size)
+num_pp_stages = args.num_devices // batch_size if args.num_devices >= batch_size * 2 else 2
+
+total_latency = (
+    num_layers * layer_flops(batch_size // num_tp_stages) / (args.flops * 1e12) * 3 # 3 = 1F + 2B
+    + comm_time(layer_size, args.out_bw * 1e6, 2) * 2 # 2 = 1F + 1B
+    + num_layers * allgather_time(intermediate_size // num_tp_stages, args.out_bw * 1e6, num_tp_stages) # all gather result
+    + num_layers * reducescatter_time(intermediate_size // num_tp_stages, args.out_bw * 1e6, num_tp_stages) # all scatter inputs
+)
+
+print("total_latency", total_latency)
+print("intermediate_size (MB)", intermediate_size / MB)
+print("hidden_comm_time_out", comm_time(intermediate_size / batch_size * (batch_size / 16), args.out_bw * 1e6, 2))
+print("hidden_comm_time_in", comm_time(intermediate_size / batch_size * (batch_size / 16), args.in_bw * 1e6, 2))
+print("hidden_compute_time_f", layer_flops(batch_size / 16) / (args.flops * 1e12))
+print("hidden_compute_time_b", layer_flops(batch_size / 16) / (args.flops * 1e12) * 2)
