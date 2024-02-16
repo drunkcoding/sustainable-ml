@@ -181,17 +181,31 @@ print("compute_latency", compute_latency)
 
 total_latency = (
     num_layers * layer_flops(batch_size // num_tp_stages) / (args.flops * 1e12) * 3  # * (num_layers-1)*num_layers / 2 # 3 = 1F + 2B
-    + comm_time(layer_size, args.out_bw * 1e6, 2) * 2 # 2 = 1F + 1B
-    + num_layers * allgather_time(intermediate_size // num_tp_stages, args.out_bw * 1e6, num_tp_stages) * 8 # all gather result for all ops
-    + num_layers * reducescatter_time(intermediate_size // num_tp_stages, args.out_bw * 1e6, num_tp_stages) * 8 * 2 # scatter inputs for all ops
-    + num_layers * reducescatter_time(layer_size // num_tp_stages, args.out_bw * 1e6, num_tp_stages) * 8 # scatter weight for all ops
-    + num_layers * comm_time(layer_size // num_tp_stages, args.in_bw * 1e6, 2) # parameter update
-    + num_layers * comm_time(layer_size // num_tp_stages, args.out_bw * 1e6, 2) # parameter update
+    + num_layers * comm_time(layer_size // num_tp_stages, args.in_bw * 1e6, 2) * 2 # tensor shards to device, 1F + 1B
+    + num_layers * comm_time(intermediate_size, args.in_bw * 1e6, 2) * 8 * 2 # send all inputs to device, 1F + 1B
+    # + num_layers * allgather_time(intermediate_size // num_tp_stages, args.out_bw * 1e6, num_tp_stages) * 8 # all gather result for all ops
+    + num_layers * reducescatter_time(intermediate_size // num_tp_stages, args.out_bw * 1e6, num_tp_stages) * 8 * 2 # get all inputs from device, 1F + 1B
+    + num_layers * reducescatter_time(layer_size // num_tp_stages, args.out_bw * 1e6, num_tp_stages) # scatter weight for all ops
+    # + num_layers * comm_time(layer_size // num_tp_stages, args.in_bw * 1e6, 2) # send new parameter to device
+    # + num_layers * comm_time(layer_size // num_tp_stages, args.out_bw * 1e6, 2) # send grad to server
 )
 
-print("total_latency", total_latency)
-print("intermediate_size (MB)", intermediate_size / MB)
-print("hidden_comm_time_out", comm_time(intermediate_size / batch_size * (batch_size / 16), args.out_bw * 1e6, 2))
-print("hidden_comm_time_in", comm_time(intermediate_size / batch_size * (batch_size / 16), args.in_bw * 1e6, 2))
-print("hidden_compute_time_f", layer_flops(batch_size / 16) / (args.flops * 1e12))
-print("hidden_compute_time_b", layer_flops(batch_size / 16) / (args.flops * 1e12) * 2)
+print("total_latency w/o client cache", total_latency)
+# print("intermediate_size (MB)", intermediate_size / MB)
+# print("hidden_comm_time_out", comm_time(intermediate_size / batch_size * (batch_size / 16), args.out_bw * 1e6, 2))
+# print("hidden_comm_time_in", comm_time(intermediate_size / batch_size * (batch_size / 16), args.in_bw * 1e6, 2))
+# print("hidden_compute_time_f", layer_flops(batch_size / 16) / (args.flops * 1e12))
+# print("hidden_compute_time_b", layer_flops(batch_size / 16) / (args.flops * 1e12) * 2)
+
+total_latency = (
+    num_layers * layer_flops(batch_size // num_tp_stages) / (args.flops * 1e12) * 3  # * (num_layers-1)*num_layers / 2 # 3 = 1F + 2B
+    + num_layers * comm_time(layer_size // num_tp_stages, args.in_bw * 1e6, 2) # tensor shards to device, 1F, cache for backward
+    + num_layers * comm_time(intermediate_size, args.in_bw * 1e6, 2) * 8 # send all inputs to device, 1F, cache for backward
+    # + num_layers * allgather_time(intermediate_size // num_tp_stages, args.out_bw * 1e6, num_tp_stages) * 8 # all gather result for all ops
+    + num_layers * reducescatter_time(intermediate_size // num_tp_stages, args.out_bw * 1e6, num_tp_stages) * 8 * 2 # get all inputs from device, 1F + 1B
+    + num_layers * reducescatter_time(layer_size // num_tp_stages, args.out_bw * 1e6, num_tp_stages) # get gradients in B
+    # + num_layers * comm_time(layer_size // num_tp_stages, args.in_bw * 1e6, 2) # send new parameter to device
+    # + num_layers * comm_time(layer_size // num_tp_stages, args.out_bw * 1e6, 2) # send grad to server
+)
+
+print("total_latency w/ client cache", total_latency)
