@@ -21,6 +21,9 @@ def allgather_time(size, bw, n):
 def reducescatter_time(size, bw, n):
     return size / bw * (n - 1) / n
 
+def gossipscatter_time(size, bw, n):
+    return size / bw * np.log2(n)
+
 def comm_time(size, bw, pp):
     return size / bw * (pp - 1)
 
@@ -112,7 +115,7 @@ intermediate_size = batch_size * seq_len * hidden_size * dtype_size
 hybrid_latency_list = []
 for num_dp_stage in range(1, args.num_devices + 1):
     for num_pp_stage in range(2, args.num_devices + 1):
-        if num_dp_stage * num_pp_stage != args.num_devices or num_pp_stage > num_layers * 5:
+        if num_dp_stage * num_pp_stage != args.num_devices or num_pp_stage > num_layers * 5 or num_dp_stage > batch_size:
             continue
 
         compute_time = num_layers * layer_flops(batch_size // num_dp_stage) / (args.flops * 1e12) * 3 # 3 = 1F + 2B
@@ -120,7 +123,7 @@ for num_dp_stage in range(1, args.num_devices + 1):
         fully_overlap_pp_comm_time = max(pp_comm_time, compute_time) - min(compute_time, pp_comm_time)
         allredice_time = num_layers * allreduce_time(layer_size, args.out_bw * 1e6, num_dp_stage)
         fully_overlap_allreduce_time = max(allredice_time, compute_time / 3 * 2) - min(allredice_time, compute_time / 3 * 2)
-
+        # print(compute_time, batch_size, num_dp_stage, pp_comm_time, allredice_time, fully_overlap_pp_comm_time, fully_overlap_allreduce_time)
         total_latency = (
             compute_time + fully_overlap_pp_comm_time + fully_overlap_allreduce_time
             # + num_layers * allreduce_time(layer_size, args.out_bw * 1e6, num_dp_stage)
@@ -170,14 +173,20 @@ plt.ylabel("Pipeline Parallelism Stage")
 
 plt.savefig("hybrid_latency.pdf")
 
-num_tp_stages = max(args.num_devices, batch_size)
+num_tp_stages = min(args.num_devices, batch_size)
 num_pp_stages = args.num_devices // batch_size if args.num_devices >= batch_size * 2 else 2
 
+compute_latency = num_layers * layer_flops(batch_size // num_tp_stages) / (args.flops * 1e12) * 3  * (num_layers-1)*num_layers / 2 # 3 = 1F + 2B
+print("compute_latency", compute_latency)
+
 total_latency = (
-    num_layers * layer_flops(batch_size // num_tp_stages) / (args.flops * 1e12) * 3 # 3 = 1F + 2B
+    num_layers * layer_flops(batch_size // num_tp_stages) / (args.flops * 1e12) * 3  # * (num_layers-1)*num_layers / 2 # 3 = 1F + 2B
     + comm_time(layer_size, args.out_bw * 1e6, 2) * 2 # 2 = 1F + 1B
-    + num_layers * allgather_time(intermediate_size // num_tp_stages, args.out_bw * 1e6, num_tp_stages) # all gather result
-    + num_layers * reducescatter_time(intermediate_size // num_tp_stages, args.out_bw * 1e6, num_tp_stages) # all scatter inputs
+    + num_layers * allgather_time(intermediate_size // num_tp_stages, args.out_bw * 1e6, num_tp_stages) * 8 # all gather result for all ops
+    + num_layers * reducescatter_time(intermediate_size // num_tp_stages, args.out_bw * 1e6, num_tp_stages) * 8 * 2 # scatter inputs for all ops
+    + num_layers * reducescatter_time(layer_size // num_tp_stages, args.out_bw * 1e6, num_tp_stages) * 8 # scatter weight for all ops
+    + num_layers * comm_time(layer_size // num_tp_stages, args.in_bw * 1e6, 2) # parameter update
+    + num_layers * comm_time(layer_size // num_tp_stages, args.out_bw * 1e6, 2) # parameter update
 )
 
 print("total_latency", total_latency)
