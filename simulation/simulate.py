@@ -2,7 +2,7 @@ import numpy as np
 import transformers
 import argparse
 from transformers import AutoConfig
-
+from flops_computation_electra import FLOPS_Calculation
 KB = 1024
 MB = 1024 * KB
 GB = 1024 * MB
@@ -47,7 +47,7 @@ config = AutoConfig.from_pretrained(args.model)
 num_layers = config.num_hidden_layers
 hidden_size = config.hidden_size
 ffn_size = config.ffn_dim
-
+vocab_size = config.vocab_size
 batch_size = args.batch_size
 seq_len = args.seq_len
 dtype_size = 4 if args.dtype == "float" else 2
@@ -103,7 +103,7 @@ layer_size = Q_size + K_size + V_size + O_size + fc1_size + fc2_size
 intermediate_size = batch_size * seq_len * hidden_size * dtype_size
 
 
-
+flops_cls = FLOPS_Calculation(h=hidden_size, s=seq_len, v=vocab_size)
 
 # num_dp_stage = args.dp
 # num_pp_stage = args.pp
@@ -119,6 +119,7 @@ for num_dp_stage in range(1, args.num_devices + 1):
             continue
 
         compute_time = num_layers * layer_flops(batch_size // num_dp_stage) / (args.flops * 1e12) * 3 # 3 = 1F + 2B
+        #compute_time = num_layers * flops_cls.get_train_flops_per_layer(batch_size // num_dp_stage) / (args.flops * 1e12) * 3 # 3 = 1F + 2B
         pp_comm_time = comm_time(intermediate_size // num_dp_stage, args.out_bw * 1e6, num_pp_stage) * 2 # 2 = 1F + 1B
         fully_overlap_pp_comm_time = max(pp_comm_time, compute_time) - min(compute_time, pp_comm_time)
         dp_allreduce_time = allreduce_time(layer_size, args.out_bw * 1e6, num_dp_stage) * num_layers
