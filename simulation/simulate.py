@@ -3,6 +3,8 @@ import transformers
 import argparse
 from transformers import AutoConfig
 from flops_computation_electra import FLOPS_Calculation
+from auto_sharding_solver_cost import *
+
 KB = 1024
 MB = 1024 * KB
 GB = 1024 * MB
@@ -140,6 +142,10 @@ for num_dp_stage in range(1, args.num_devices + 1):
             }
         )
     
+
+
+auto_sharding_costs = attention_forward(batch_size=batch_size, seq_len=seq_len, hidden_dim=hidden_size, num_head=config.num_attention_heads) + \
+			 mlp_2_layer_bias(batch_size=batch_size, hidden_dim=ffn_size)
 
 STATE_NONE = -1
 STATE_INGRESS = 0
