@@ -1,6 +1,9 @@
 *.pdf
 *.csv
 *.log
+*.png
+*.zip
+*.txt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
