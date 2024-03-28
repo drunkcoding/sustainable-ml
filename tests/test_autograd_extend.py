@@ -9,6 +9,7 @@ from transformers.models.opt.modeling_opt import OPTDecoderLayer
 import asyncio
 import concurrent
 import multiprocessing as mp
+from edgeml.ops.op_builder.prefetch import BackendBuilder
 
 gpu_unit = 0.1
 num_gpus = torch.cuda.device_count()
@@ -19,12 +20,40 @@ def delegated_mm(A, B, gid):
     print("mm", gid, torch.cuda.memory_reserved(gid) / 1024**3, A.numel() * A.element_size() / 1024**3, B.numel() * B.element_size() / 1024**3)
     return A.matmul(B.to(f"cuda:{gid}")).to("cpu")
 
+
+def backward_test(device):
+    config = AutoConfig.from_pretrained("facebook/opt-2.7b", torch_dtype=torch.bfloat16)
+    decoder_layer = OPTDecoderLayer(config).to(device)
+
+    hidden_size = config.hidden_size
+    seq_len = 1024
+    batch_size = 32
+
+    hidden_states = torch.rand(batch_size, seq_len, hidden_size)
+    hidden_states.requires_grad = False
+    hidden_states = hidden_states.to(device)
+    # attention_mask = torch.ones(batch_size, seq_len, device="cuda")
+    # position_ids = torch.arange(seq_len, device="cuda").unsqueeze(0).expand(batch_size, seq_len)
+
+    # get GPU free memory in GB
+    print(torch.cuda.memory_reserved(0) / 1024**3)
+
+    # output = decoder_layer(hidden_states, position_ids=position_ids)
+    output = decoder_layer(hidden_states)
+    # print("output", output)
+    start_time = time.time()
+    output[0].sum().backward()
+    print("time", device, time.time() - start_time)
+
 if __name__ == "__main__":
     mp.freeze_support()
 
     torch.multiprocessing.set_start_method('spawn')
 
-    pool = mp.Pool(num_actor_gpus)
+    # pool = mp.Pool(num_actor_gpus)
+
+    backend_lib = BackendBuilder().load()
+    backend = backend_lib.matmul_threadpool(4)
 
     # @ray.remote(num_gpus=gpu_unit)
     # class GPUActor:
@@ -36,6 +65,9 @@ if __name__ == "__main__":
     # print("num_gpus", num_gpus, "num_actor_gpus", num_actor_gpus)
     # round to lower 2^n
 
+    if mp.parent_process() is None:
+        backward_test("cuda:0")
+    torch.cuda.empty_cache()
 
     print("num_gpus", num_gpus, "num_actor_gpus", num_actor_gpus)
 
@@ -139,6 +171,7 @@ if __name__ == "__main__":
                 # grad_input = ray.get(gpu_actors[0].mm.remote(grad_output.view(-1, grad_output.shape[-1]), weight.t()))
                 grad_input_shape = grad_output.shape[:-1] + (weight.shape[-2],)
                 grad_input = LinearFunction.submit_to_ray(grad_output.reshape(-1, grad_output.shape[-1]), weight.t())
+                # grad_input = LinearFunction.normal_mm(grad_output.reshape(-1, grad_output.shape[-1]), weight.t())
                 grad_input = grad_input.reshape(grad_input_shape)
             if ctx.needs_input_grad[1]:
                 # grad_weight = grad_output.t().mm(input)
@@ -146,6 +179,7 @@ if __name__ == "__main__":
                 # print("grad_output.t()", grad_output.t().shape, "input", input.shape)
                 grad_weight_shape = (grad_output.shape[-1], ) + input.shape[-1:]
                 grad_weight = LinearFunction.submit_to_ray(grad_output.reshape(-1, grad_output.shape[-1]).t(), input.reshape(-1, input.shape[-1]))
+                # grad_weight = LinearFunction.normal_mm(grad_output.reshape(-1, grad_output.shape[-1]).t(), input.view(-1, input.shape[-1]))
                 grad_weight = grad_weight.reshape(grad_weight_shape).t()
             if bias is not None and ctx.needs_input_grad[2]:
                 grad_bias = grad_output.sum(0)
@@ -154,6 +188,9 @@ if __name__ == "__main__":
 
             return grad_input, grad_weight, grad_bias
         
+        @staticmethod 
+        def normal_mm(A, B):
+            return A.to("cuda").matmul(B.to("cuda")).to("cpu")
 
         @staticmethod
         def submit_to_ray(A, B):
@@ -169,12 +206,29 @@ if __name__ == "__main__":
                 B = B.split(size_each_actor, dim=1)  
                 num_proc = len(B)
 
-            # one copy of A on all GPU
-            A_gpus = [A.detach().to(f"cuda:{i}") for i in range(num_gpus)]
+            B = [b.detach().contiguous() for i, b in enumerate(B)]
+            A = A.detach().contiguous()
+            # B = [b.to(f"cuda:{i % num_gpus}") for i, b in enumerate(B)]
 
-            global pool
-            outputs = pool.starmap(delegated_mm, [(A_gpus[i % num_gpus], B[i].detach(), i % num_gpus) for i in range(num_proc)])
-            outputs = torch.cat(outputs, dim=-1)
+            # one copy of A on all GPU
+            # A_gpus = [A.to(f"cuda:{i}") for i in range(num_gpus)]
+
+            outputs = [torch.zeros(1, device=f"cuda:{i % num_gpus}", requires_grad=False) for i in range(num_proc)]
+            for i in range(num_proc):
+                # print("enqueue", i, A_gpus[i % num_gpus].shape, B[i].shape, outputs[i].shape)
+                # backend.enqueue(A_gpus[i % num_gpus], B[i], outputs[i], i % num_gpus)
+                backend.enqueue(A, B[i], outputs[i], i % num_gpus)
+
+            outputs = backend.wait_all()
+            # outputs = [output.to("cpu") for output in outputs]
+            # outputs = torch.cat(outputs, dim=-1)
+            outputs.requires_grad = True
+
+            # print(outputs)
+
+            # global pool
+            # outputs = pool.starmap(delegated_mm, [(A_gpus[i % num_gpus], B[i].detach(), i % num_gpus) for i in range(num_proc)])
+            # outputs = torch.cat(outputs, dim=-1)
 
             # mp.freeze_support()
             # with mp.Pool(num_proc) as pool:
@@ -218,26 +272,7 @@ if __name__ == "__main__":
 
     # run code only on main process
     if mp.parent_process() is None:
-
-        config = AutoConfig.from_pretrained("facebook/opt-2.7b", torch_dtype=torch.bfloat16)
-        decoder_layer = OPTDecoderLayer(config)
-
-        hidden_size = config.hidden_size
-        seq_len = 1024
-        batch_size = 32
-
-        hidden_states = torch.rand(batch_size, seq_len, hidden_size)
-        hidden_states.requires_grad = False
-        # attention_mask = torch.ones(batch_size, seq_len, device="cuda")
-        position_ids = torch.arange(seq_len, device="cuda").unsqueeze(0).expand(batch_size, seq_len)
-
-        # get GPU free memory in GB
-        print(torch.cuda.memory_reserved(0) / 1024**3)
-
-        # output = decoder_layer(hidden_states, position_ids=position_ids)
-        output = decoder_layer(hidden_states)
-        # print("output", output)
-        output[0].sum().backward()
+        backward_test("cpu")
 
     exit()
 
